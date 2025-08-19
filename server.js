@@ -1,8 +1,3 @@
-// server.js
-// Backend server for shift management application using Node.js, Express.js, PostgreSQL
-// Technologies: Express, pg, bcryptjs, jsonwebtoken, cors, dotenv
-// Author: Backend Expert
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -10,11 +5,14 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 
+// ===================================================================================
+// KHỞI TẠO VÀ CẤU HÌNH BAN ĐẦU
+// ===================================================================================
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// PostgreSQL connection pool
 const pool = new Pool({
   user: process.env.DB_USER,
   host: process.env.DB_HOST,
@@ -26,7 +24,10 @@ const pool = new Pool({
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
 
-// Helper: JWT Authentication Middleware
+// ===================================================================================
+// MIDDLEWARES (BẢO VỆ API)
+// ===================================================================================
+
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -38,7 +39,6 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// Helper: Admin Middleware
 function requireAdmin(req, res, next) {
   if (!req.user || !req.user.is_admin) {
     return res.status(403).json({ message: 'Admin access required' });
@@ -46,8 +46,10 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// --- AUTH ROUTES ---
-// Đăng nhập cho admin
+// ===================================================================================
+// API XÁC THỰC (AUTH ROUTES)
+// ===================================================================================
+
 app.post('/api/v1/auth/admin/login', async (req, res) => {
   const { employee_id, password } = req.body;
   try {
@@ -73,11 +75,11 @@ app.post('/api/v1/auth/admin/login', async (req, res) => {
     );
     res.json({ token, is_password_default: user.is_password_default });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Đăng nhập cho nhân viên thường
 app.post('/api/v1/auth/staff/login', async (req, res) => {
   const { employee_id, password } = req.body;
   try {
@@ -103,6 +105,7 @@ app.post('/api/v1/auth/staff/login', async (req, res) => {
     );
     res.json({ token, is_password_default: user.is_password_default });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -118,11 +121,15 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     );
     res.json({ message: 'Password changed successfully' });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// --- SCHEDULE ROUTES (Employee) ---
+// ===================================================================================
+// API LỊCH LÀM VIỆC (SCHEDULE ROUTES)
+// ===================================================================================
+
 app.get('/api/schedules', authenticateToken, async (req, res) => {
   const { employee_id } = req.user;
   const { month, year } = req.query;
@@ -137,6 +144,7 @@ app.get('/api/schedules', authenticateToken, async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -148,7 +156,6 @@ app.post('/api/schedules', authenticateToken, async (req, res) => {
     return res.status(400).json({ message: 'Invalid request body' });
   }
   try {
-    // Check for conflicts
     for (const sch of schedules) {
       const conflict = await pool.query(
         'SELECT 1 FROM employee_schedules WHERE employee_id = $1 AND shift_id = $2 AND schedule_date = $3',
@@ -158,7 +165,6 @@ app.post('/api/schedules', authenticateToken, async (req, res) => {
         return res.status(409).json({ message: `Conflict: Already registered for shift_id ${sch.shift_id} on ${sch.schedule_date}` });
       }
     }
-    // Insert schedules
     for (const sch of schedules) {
       await pool.query(
         'INSERT INTO employee_schedules (employee_id, shift_id, schedule_date, shift_part, status) VALUES ($1, $2, $3, $4, $5)',
@@ -167,11 +173,43 @@ app.post('/api/schedules', authenticateToken, async (req, res) => {
     }
     res.status(201).json({ message: 'Schedules created successfully' });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// --- ADMIN ROUTES ---
+// ===================================================================================
+// API QUẢN TRỊ (ADMIN ROUTES)
+// ===================================================================================
+
+app.post('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+    const { employee_id, ho_va_ten, email, phong_ban, is_admin } = req.body;
+    
+    if (!employee_id || !ho_va_ten || !email) {
+        return res.status(400).json({ message: 'Employee ID, name, and email are required' });
+    }
+
+    try {
+        const defaultPassword = '1';
+        const password_hash = await bcrypt.hash(defaultPassword, 10);
+
+        const newUser = await pool.query(
+            `INSERT INTO data_nhanvien (employee_id, ho_va_ten, email, phong_ban, password_hash, is_admin, is_password_default)
+             VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+             RETURNING employee_id, ho_va_ten, email, phong_ban, is_admin`,
+            [employee_id, ho_va_ten, email, phong_ban, password_hash, is_admin || false]
+        );
+
+        res.status(201).json(newUser.rows[0]);
+    } catch (err) {
+        console.error(err);
+        if (err.code === '23505') { // Unique violation
+            return res.status(409).json({ message: 'Employee ID or email already exists' });
+        }
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
 app.get('/api/admin/schedules', authenticateToken, requireAdmin, async (req, res) => {
   const { month, year, phong_ban } = req.query;
   let query = `SELECT es.id, dn.ho_va_ten, dn.phong_ban, es.schedule_date, s.shift_name, es.shift_part, es.status
@@ -189,6 +227,7 @@ app.get('/api/admin/schedules', authenticateToken, requireAdmin, async (req, res
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -209,16 +248,21 @@ app.put('/api/admin/schedules/:id', authenticateToken, requireAdmin, async (req,
     }
     res.json(update.rows[0]);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// --- UTILITY ROUTES ---
+// ===================================================================================
+// API TIỆN ÍCH (UTILITY ROUTES)
+// ===================================================================================
+
 app.get('/api/shifts', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, shift_name FROM shifts ORDER BY id ASC');
     res.json(result.rows);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -235,13 +279,11 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
     }
     res.json(result.rows[0]);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// --- SERVER START ---
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
-
-// --- END OF FILE ---
