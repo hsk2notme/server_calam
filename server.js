@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { Pool } = require('pg');
+const pool = require('./database');
 
 // ===================================================================================
 // KHỞI TẠO VÀ CẤU HÌNH BAN ĐẦU
@@ -13,13 +13,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_DATABASE,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
-});
+// Đã sử dụng pool từ database.js
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3000;
@@ -127,10 +121,11 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
 });
 
 // ===================================================================================
-// API LỊCH LÀM VIỆC (SCHEDULE ROUTES)
+// API CHO NHÂN VIÊN (EMPLOYEE ROUTES)
 // ===================================================================================
 
-app.get('/api/schedules', authenticateToken, async (req, res) => {
+// Lấy lịch làm việc cá nhân
+app.get('/api/employee/schedules', authenticateToken, async (req, res) => {
   const { employee_id } = req.user;
   const { month, year } = req.query;
   try {
@@ -149,7 +144,8 @@ app.get('/api/schedules', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/schedules', authenticateToken, async (req, res) => {
+// Đăng ký ca làm mới
+app.post('/api/employee/schedules', authenticateToken, async (req, res) => {
   const { employee_id } = req.user;
   const schedules = req.body;
   if (!Array.isArray(schedules)) {
@@ -178,32 +174,73 @@ app.post('/api/schedules', authenticateToken, async (req, res) => {
   }
 });
 
+// Gửi yêu cầu đổi ca
+app.post('/api/employee/schedules/change-request', authenticateToken, async (req, res) => {
+    const { original_schedule_id, new_shift_id, new_shift_part, reason } = req.body;
+    const { employee_id } = req.user;
+    try {
+        const result = await pool.query(
+            'INSERT INTO change_requests (original_schedule_id, user_id, new_shift_id, new_shift_part, reason, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+            [original_schedule_id, employee_id, new_shift_id, new_shift_part, reason, 'pending']
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Xem lịch sử nghỉ phép
+app.get('/api/employee/leaves', authenticateToken, async (req, res) => {
+    const { employee_id } = req.user;
+    try {
+        const result = await pool.query('SELECT * FROM leave_requests WHERE employee_id = $1 ORDER BY start_date DESC', [employee_id]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Gửi yêu cầu nghỉ phép
+app.post('/api/employee/leaves', authenticateToken, async (req, res) => {
+    const { request_type, start_date, end_date, reason } = req.body;
+    const { employee_id } = req.user;
+    try {
+        const result = await pool.query(
+            'INSERT INTO leave_requests (employee_id, request_type, start_date, end_date, reason, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+            [employee_id, request_type, start_date, end_date, reason, 'pending']
+        );
+        res.status(201).json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+
 // ===================================================================================
 // API QUẢN TRỊ (ADMIN ROUTES)
 // ===================================================================================
 
 app.post('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
     const { employee_id, ho_va_ten, email, phong_ban, is_admin } = req.body;
-    
     if (!employee_id || !ho_va_ten || !email) {
         return res.status(400).json({ message: 'Employee ID, name, and email are required' });
     }
-
     try {
         const defaultPassword = '1';
         const password_hash = await bcrypt.hash(defaultPassword, 10);
-
         const newUser = await pool.query(
             `INSERT INTO data_nhanvien (employee_id, ho_va_ten, email, phong_ban, password_hash, is_admin, is_password_default)
              VALUES ($1, $2, $3, $4, $5, $6, TRUE)
              RETURNING employee_id, ho_va_ten, email, phong_ban, is_admin`,
             [employee_id, ho_va_ten, email, phong_ban, password_hash, is_admin || false]
         );
-
         res.status(201).json(newUser.rows[0]);
     } catch (err) {
         console.error(err);
-        if (err.code === '23505') { // Unique violation
+        if (err.code === '23505') {
             return res.status(409).json({ message: 'Employee ID or email already exists' });
         }
         res.status(500).json({ message: 'Server error' });
@@ -253,6 +290,86 @@ app.put('/api/admin/schedules/:id', authenticateToken, requireAdmin, async (req,
   }
 });
 
+// Xem tất cả yêu cầu nghỉ phép
+app.get('/api/admin/leaves', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT lr.id, dn.ho_va_ten, dn.phong_ban, lr.request_type, lr.start_date, lr.end_date, lr.reason, lr.status
+            FROM leave_requests lr
+            JOIN data_nhanvien dn ON lr.employee_id = dn.employee_id
+            WHERE lr.status = 'pending'
+            ORDER BY lr.start_date ASC
+        `);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Duyệt yêu cầu nghỉ phép
+app.put('/api/admin/leaves/:id', authenticateToken, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!['approved', 'rejected'].includes(status)) {
+        return res.status(400).json({ message: 'Invalid status' });
+    }
+    try {
+        const result = await pool.query('UPDATE leave_requests SET status = $1 WHERE id = $2 RETURNING *', [status, id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Leave request not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Xem tất cả yêu cầu đổi ca
+app.get('/api/admin/change-requests', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT cr.id, dn.ho_va_ten, cr.reason, cr.status,
+                   es.schedule_date AS original_date,
+                   os.shift_name AS original_shift,
+                   ns.shift_name AS new_shift
+            FROM change_requests cr
+            JOIN data_nhanvien dn ON cr.user_id = dn.employee_id
+            JOIN employee_schedules es ON cr.original_schedule_id = es.id
+            JOIN shifts os ON es.shift_id = os.id
+            JOIN shifts ns ON cr.new_shift_id = ns.id
+            WHERE cr.status = 'pending'
+            ORDER BY es.schedule_date ASC
+        `);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// Duyệt yêu cầu đổi ca
+app.put('/api/admin/change-requests/:id', authenticateToken, requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+     if (!['approved', 'rejected'].includes(status)) {
+        return res.status(400).json({ message: 'Invalid status' });
+    }
+    try {
+        // This logic can be more complex, e.g., actually swapping shifts
+        const result = await pool.query('UPDATE change_requests SET status = $1 WHERE id = $2 RETURNING *', [status, id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Change request not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server error' });
+    }
+});
+
+
 // ===================================================================================
 // API TIỆN ÍCH (UTILITY ROUTES)
 // ===================================================================================
@@ -283,6 +400,10 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+
+// ===================================================================================
+// KHỞI ĐỘNG SERVER
+// ===================================================================================
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
