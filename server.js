@@ -225,8 +225,8 @@ app.post('/api/employee/leaves', authenticateToken, async (req, res) => {
 
 app.post('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
     const { employee_id, ho_va_ten, email, phong_ban, is_admin } = req.body;
-    if (!employee_id || !ho_va_ten || !email) {
-        return res.status(400).json({ message: 'Employee ID, name, and email are required' });
+    if (!employee_id) {
+    return res.status(400).json({ message: 'Employee ID is required' });
     }
     try {
         const defaultPassword = '1';
@@ -235,7 +235,7 @@ app.post('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =
             `INSERT INTO data_nhanvien (employee_id, ho_va_ten, email, phong_ban, password_hash, is_admin, is_password_default)
              VALUES ($1, $2, $3, $4, $5, $6, TRUE)
              RETURNING employee_id, ho_va_ten, email, phong_ban, is_admin`,
-            [employee_id, ho_va_ten, email, phong_ban, password_hash, is_admin || false]
+            [employee_id, ho_va_ten || null, email || null, phong_ban || null, password_hash, is_admin || false]
         );
         res.status(201).json(newUser.rows[0]);
     } catch (err) {
@@ -408,3 +408,4 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
